@@ -29,10 +29,17 @@ Headless plugin: server-only, no frontend bundle, no settings.
   workspace that isn't cached yet waits up to 1.5s for the background scan
   in case it finishes in time (typical for small/medium projects); if not,
   it returns no results for that keystroke and a later one lands once the
-  scan completes. Common vendor/build directories (`node_modules`,
-  `vendor`, `.git`, `dist`, `build`, `out`, `.next`, `target`, `.venv`,
-  `venv`, `__pycache__`, `.idea`, `.vscode`) are filtered out of the index
-  so they don't crowd out real project files in the suggestions.
+  scan completes.
+- **`.gitignore`-aware.** The index only keeps paths git would track. It
+  reads whatever `.gitignore` files actually exist in the tree — however
+  many and however nested (e.g. one per app when several projects share
+  one parent directory, each governing only its own subtree) — rather than
+  a fixed directory denylist, so it matches each project's own definition
+  of "vendor/build noise" instead of a guess. `.git/` itself is always
+  excluded. Directories are resolved shallowest-first so a directory ruled
+  out by its parent's `.gitignore` is skipped entirely — a `vendor/` tree
+  full of its own nested `.gitignore` files (common with `composer`/`npm`
+  packages) costs zero extra reads once `vendor/` itself is excluded.
 - **Resolve** depends on what was picked:
   - **File** — reads it (`bb.sdk.files.read`) and returns its contents as
     the mention's context, wrapped in a fenced code block. Binary files
@@ -40,10 +47,10 @@ Headless plugin: server-only, no frontend bundle, no settings.
     Text content is capped at 200,000 characters; longer files are
     truncated with a trailing `(truncated)` marker rather than blocking the
     send.
-  - **Directory** — lists everything under it (also via
-    `bb.sdk.files.listPaths`, up to 500 entries) and returns that listing
-    as the mention's context, one relative path per line, directories
-    suffixed with `/`.
+  - **Directory** — lists everything git-tracked under it (same
+    `.gitignore` resolution as indexing, scoped to that directory, up to
+    500 entries) and returns that listing as the mention's context, one
+    relative path per line, directories suffixed with `/`.
 - No thread/environment attached to the composer yet (e.g. a brand new
   thread before it's created) → the provider returns no results rather than
   erroring.

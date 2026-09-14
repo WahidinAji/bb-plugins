@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-mention-the-file",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "license": "MIT",
   "type": "module",
   "files": [
@@ -21,6 +21,9 @@
   },
   "scripts": {
     "build": "bb plugin build"
+  },
+  "dependencies": {
+    "ignore": "^7.0.9"
   },
   "devDependencies": {
     "@get-bb/plugin-sdk": "0.4.47",

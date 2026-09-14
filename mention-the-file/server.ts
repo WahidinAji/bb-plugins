@@ -5,6 +5,7 @@
 // attaches its contents as agent-visible (user-hidden) context; picking a
 // directory attaches a listing of everything under it.
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import ignore, { type Ignore } from "ignore";
 
 const MAX_RESULTS = 20;
 // Keep a single mention's context comfortably below typical model context
@@ -16,7 +17,7 @@ type EntryKind = "file" | "directory";
 interface IndexEntry {
   kind: EntryKind;
   name: string;
-  path: string; // relative to the workspace root
+  path: string; // relative to whatever root this entry was resolved against
 }
 
 // `search` is time-boxed to 2s by the host; a vendor-heavy monorepo (e.g. two
@@ -30,28 +31,89 @@ interface IndexEntry {
 // keystroke lands after the background build has populated the cache.
 const SEARCH_BUDGET_MS = 1_500;
 const INDEX_TTL_MS = 5 * 60_000;
-const INDEX_LIMIT = 20_000;
+const INDEX_LIMIT = 50_000;
 
-// Directories whose contents are rarely what someone means to mention and
-// are the usual reason a workspace-wide scan is slow to begin with.
-const IGNORED_DIR_NAMES = new Set([
-  "node_modules",
-  "vendor",
-  ".git",
-  "dist",
-  "build",
-  "out",
-  ".next",
-  "target",
-  ".venv",
-  "venv",
-  "__pycache__",
-  ".idea",
-  ".vscode",
-]);
+function dirOf(relativePath: string): string {
+  const separatorIndex = relativePath.lastIndexOf("/");
+  return separatorIndex === -1 ? "" : relativePath.slice(0, separatorIndex);
+}
 
-function isIgnoredPath(relativePath: string): boolean {
-  return relativePath.split("/").some((segment) => IGNORED_DIR_NAMES.has(segment));
+/** Every prefix directory of `dir`, root ("") first. */
+function ancestorChain(dir: string): string[] {
+  if (dir === "") return [""];
+  const parts = dir.split("/");
+  const chain = [""];
+  let current = "";
+  for (const part of parts) {
+    current = current === "" ? part : `${current}/${part}`;
+    chain.push(current);
+  }
+  return chain;
+}
+
+/**
+ * Filters a flat, recursively-listed entry set down to what git would track,
+ * honoring however many nested `.gitignore` files exist in the tree (e.g. one
+ * per app when several projects share one parent directory) rather than a
+ * fixed directory denylist. Processes shallowest-first so a directory's own
+ * ignored status (from its *parent's* rules) short-circuits before its
+ * `.gitignore` is ever fetched — the reason a `vendor/` tree with thousands
+ * of its own nested `.gitignore` files doesn't cost thousands of extra reads.
+ */
+async function filterTracked(
+  entries: IndexEntry[],
+  readGitignore: (relativePath: string) => Promise<string | null>,
+): Promise<IndexEntry[]> {
+  const sorted = [...entries].sort(
+    (a, b) => a.path.split("/").length - b.path.split("/").length,
+  );
+  const gitignores = new Map<string, Ignore>();
+  const ignoredDirs = new Set<string>();
+
+  function isUnderIgnoredDir(path: string): boolean {
+    let dir = dirOf(path);
+    while (dir !== "") {
+      if (ignoredDirs.has(dir)) return true;
+      dir = dirOf(dir);
+    }
+    return false;
+  }
+
+  function isIgnored(entry: IndexEntry): boolean {
+    let ignored = false;
+    for (const ancestor of ancestorChain(dirOf(entry.path))) {
+      const matcher = gitignores.get(ancestor);
+      if (!matcher) continue;
+      const relative =
+        ancestor === "" ? entry.path : entry.path.slice(ancestor.length + 1);
+      const testPath = entry.kind === "directory" ? `${relative}/` : relative;
+      const result = matcher.test(testPath);
+      if (result.ignored) ignored = true;
+      if (result.unignored) ignored = false;
+    }
+    return ignored;
+  }
+
+  const result: IndexEntry[] = [];
+  for (const entry of sorted) {
+    if (entry.name === ".git" && entry.kind === "directory") {
+      ignoredDirs.add(entry.path);
+      continue;
+    }
+    if (isUnderIgnoredDir(entry.path)) continue;
+    if (isIgnored(entry)) {
+      if (entry.kind === "directory") ignoredDirs.add(entry.path);
+      continue;
+    }
+    result.push(entry);
+    if (entry.kind === "file" && entry.name === ".gitignore") {
+      const content = await readGitignore(entry.path);
+      if (content !== null) {
+        gitignores.set(dirOf(entry.path), ignore().add(content));
+      }
+    }
+  }
+  return result;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -132,6 +194,21 @@ export default async function plugin(bb: BbPluginApi) {
     return `${hostId}${ID_SEPARATOR}${path}`;
   }
 
+  /** Reads `<root>/<relativePath>` as text, or null if missing/binary. */
+  function makeGitignoreReader(hostId: string, root: string) {
+    return async (relativePath: string): Promise<string | null> => {
+      try {
+        const file = await bb.sdk.files.read({
+          hostId,
+          path: joinWorkspacePath(root, relativePath),
+        });
+        return file.contentEncoding === "base64" ? null : file.content;
+      } catch {
+        return null;
+      }
+    };
+  }
+
   function ensureIndexBuilding(hostId: string, path: string): Promise<void> {
     const key = cacheKey(hostId, path);
     const existing = indexBuilds.get(key);
@@ -145,7 +222,7 @@ export default async function plugin(bb: BbPluginApi) {
           includeFiles: true,
           includeDirectories: true,
         });
-        const entries = paths.filter((entry) => !isIgnoredPath(entry.path));
+        const entries = await filterTracked(paths, makeGitignoreReader(hostId, path));
         indexCache.set(key, { entries, builtAt: Date.now() });
       } catch (error) {
         bb.log.warn(`mention-the-file: failed to index ${path}: ${String(error)}`);
@@ -202,8 +279,8 @@ export default async function plugin(bb: BbPluginApi) {
       includeFiles: true,
       includeDirectories: true,
     });
-    const listing = paths
-      .filter((entry) => !isIgnoredPath(entry.path))
+    const tracked = await filterTracked(paths, makeGitignoreReader(hostId, path));
+    const listing = tracked
       .map((entry) => (entry.kind === "directory" ? `${entry.path}/` : entry.path))
       .sort()
       .join("\n");
