@@ -8,6 +8,8 @@ you don't have to paste it in or describe where it lives.
 
 Headless plugin: server-only, no frontend bundle, no settings.
 
+![Mention menu showing fuzzy-matched README.md files](docs/mention-menu.png)
+
 ## How it works
 
 - **Trigger:** `@`, provider label **Files**.
