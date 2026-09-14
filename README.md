@@ -55,3 +55,10 @@ To clone this repo with porcelain included:
 ```bash
 git clone --recurse-submodules git@github.com:WahidinAji/bb-plugins.git
 ```
+
+> **Note:** Since porcelain lives in its own repository, this repo only pins a commit. When porcelain gets a new release, bump the pointer here:
+>
+> ```bash
+> cd bb-plugin-porcelain && git pull && cd ..
+> git add bb-plugin-porcelain && git commit -m "chore: bump porcelain"
+> ```
