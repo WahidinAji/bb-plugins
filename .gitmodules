@@ -1,0 +1,3 @@
+[submodule "bb-plugin-porcelain"]
+	path = bb-plugin-porcelain
+	url = git@github.com:WahidinAji/bb-plugin-porcelain.git
