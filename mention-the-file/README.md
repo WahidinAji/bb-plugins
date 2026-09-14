@@ -16,11 +16,23 @@ Headless plugin: server-only, no frontend bundle, no settings.
 
 - **Trigger:** `@`, provider label **Files**.
 - **Search** resolves the thread → its environment → the environment's
-  `{ hostId, path }`, then runs a recursive fuzzy name search
-  (`bb.sdk.files.listPaths`) rooted at the workspace, matching both files
-  and directories, scoped to that host — so it works for threads on
-  remote/enrolled machines too, not just the local one. Directories are
-  shown with a trailing `/`.
+  `{ hostId, path }`, then filters an in-memory index of that workspace
+  (matching both files and directories; directories are shown with a
+  trailing `/`), scoped to that host — so it works for threads on
+  remote/enrolled machines too, not just the local one.
+- **Indexing.** The mention menu's `search` call is time-boxed to 2s by BB,
+  but a full recursive scan of a large workspace (e.g. two Laravel apps'
+  worth of `vendor/`/`node_modules/`) can take much longer than that. So
+  each workspace root is indexed once in the background — unbound by the
+  2s window — and cached in memory for 5 minutes; `search` just filters
+  that cache, which is effectively instant. The first mention attempt in a
+  workspace that isn't cached yet waits up to 1.5s for the background scan
+  in case it finishes in time (typical for small/medium projects); if not,
+  it returns no results for that keystroke and a later one lands once the
+  scan completes. Common vendor/build directories (`node_modules`,
+  `vendor`, `.git`, `dist`, `build`, `out`, `.next`, `target`, `.venv`,
+  `venv`, `__pycache__`, `.idea`, `.vscode`) are filtered out of the index
+  so they don't crowd out real project files in the suggestions.
 - **Resolve** depends on what was picked:
   - **File** — reads it (`bb.sdk.files.read`) and returns its contents as
     the mention's context, wrapped in a fenced code block. Binary files

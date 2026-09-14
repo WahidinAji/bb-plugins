@@ -13,6 +13,50 @@ const MAX_CONTEXT_CHARS = 200_000;
 const MAX_DIRECTORY_ENTRIES = 500;
 
 type EntryKind = "file" | "directory";
+interface IndexEntry {
+  kind: EntryKind;
+  name: string;
+  path: string; // relative to the workspace root
+}
+
+// `search` is time-boxed to 2s by the host; a vendor-heavy monorepo (e.g. two
+// Laravel apps' worth of `vendor/`/`node_modules/`) can take minutes to walk
+// recursively, which would otherwise make every keystroke fail and the
+// provider look permanently broken. So each workspace root gets an
+// in-memory index built in the background (unbound by that 2s window) and
+// `search` just filters it in-process. The very first call for a workspace
+// waits a bounded slice of the budget for that build in case it's fast
+// enough to finish inline; slower ones fall back to `[]` until a later
+// keystroke lands after the background build has populated the cache.
+const SEARCH_BUDGET_MS = 1_500;
+const INDEX_TTL_MS = 5 * 60_000;
+const INDEX_LIMIT = 20_000;
+
+// Directories whose contents are rarely what someone means to mention and
+// are the usual reason a workspace-wide scan is slow to begin with.
+const IGNORED_DIR_NAMES = new Set([
+  "node_modules",
+  "vendor",
+  ".git",
+  "dist",
+  "build",
+  "out",
+  ".next",
+  "target",
+  ".venv",
+  "venv",
+  "__pycache__",
+  ".idea",
+  ".vscode",
+]);
+
+function isIgnoredPath(relativePath: string): boolean {
+  return relativePath.split("/").some((segment) => IGNORED_DIR_NAMES.has(segment));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 // The item id round-trips through the composer with no other context
 // available at resolve time, so it carries everything needed to read it back.
@@ -44,8 +88,74 @@ function joinWorkspacePath(root: string, relativePath: string): string {
   return `${root}/${relativePath}`.replace(/\/{2,}/g, "/");
 }
 
+function isSubsequence(needle: string, haystack: string): boolean {
+  let i = 0;
+  for (let j = 0; j < haystack.length && i < needle.length; j++) {
+    if (haystack[j] === needle[i]) i++;
+  }
+  return i === needle.length;
+}
+
+/** Lower is better; -1 means "no match". */
+function matchScore(entry: IndexEntry, queryLower: string): number {
+  if (queryLower === "") return 0;
+  const nameLower = entry.name.toLowerCase();
+  if (nameLower.startsWith(queryLower)) return 0;
+  if (nameLower.includes(queryLower)) return 1;
+  const pathLower = entry.path.toLowerCase();
+  if (pathLower.includes(queryLower)) return 2;
+  if (isSubsequence(queryLower, nameLower)) return 3;
+  if (isSubsequence(queryLower, pathLower)) return 4;
+  return -1;
+}
+
+function searchIndex(entries: IndexEntry[], query: string): IndexEntry[] {
+  const queryLower = query.trim().toLowerCase();
+  const scored: { entry: IndexEntry; score: number }[] = [];
+  for (const entry of entries) {
+    const score = matchScore(entry, queryLower);
+    if (score >= 0) scored.push({ entry, score });
+  }
+  scored.sort(
+    (a, b) => a.score - b.score || a.entry.path.length - b.entry.path.length,
+  );
+  return scored.slice(0, MAX_RESULTS).map(({ entry }) => entry);
+}
+
 export default async function plugin(bb: BbPluginApi) {
   bb.log.info("loaded");
+
+  const indexCache = new Map<string, { entries: IndexEntry[]; builtAt: number }>();
+  const indexBuilds = new Map<string, Promise<void>>();
+
+  function cacheKey(hostId: string, path: string): string {
+    return `${hostId}${ID_SEPARATOR}${path}`;
+  }
+
+  function ensureIndexBuilding(hostId: string, path: string): Promise<void> {
+    const key = cacheKey(hostId, path);
+    const existing = indexBuilds.get(key);
+    if (existing) return existing;
+    const build = (async () => {
+      try {
+        const { paths } = await bb.sdk.files.listPaths({
+          hostId,
+          path,
+          limit: INDEX_LIMIT,
+          includeFiles: true,
+          includeDirectories: true,
+        });
+        const entries = paths.filter((entry) => !isIgnoredPath(entry.path));
+        indexCache.set(key, { entries, builtAt: Date.now() });
+      } catch (error) {
+        bb.log.warn(`mention-the-file: failed to index ${path}: ${String(error)}`);
+      } finally {
+        indexBuilds.delete(key);
+      }
+    })();
+    indexBuilds.set(key, build);
+    return build;
+  }
 
   /** Resolve a thread to the host + absolute path of its workspace root. */
   async function workspaceRoot(
@@ -93,6 +203,7 @@ export default async function plugin(bb: BbPluginApi) {
       includeDirectories: true,
     });
     const listing = paths
+      .filter((entry) => !isIgnoredPath(entry.path))
       .map((entry) => (entry.kind === "directory" ? `${entry.path}/` : entry.path))
       .sort()
       .join("\n");
@@ -114,15 +225,25 @@ export default async function plugin(bb: BbPluginApi) {
       if (!threadId) return [];
       const root = await workspaceRoot(threadId);
       if (!root) return [];
-      const { paths } = await bb.sdk.files.listPaths({
-        hostId: root.hostId,
-        path: root.path,
-        query,
-        limit: MAX_RESULTS,
-        includeFiles: true,
-        includeDirectories: true,
-      });
-      return paths.map((entry) => ({
+
+      const key = cacheKey(root.hostId, root.path);
+      let cached = indexCache.get(key);
+      const stale = !cached || Date.now() - cached.builtAt > INDEX_TTL_MS;
+      if (stale) {
+        const build = ensureIndexBuilding(root.hostId, root.path);
+        if (!cached) {
+          // Nothing to serve yet: give the build a bounded slice of the
+          // 2s budget in case this workspace is small enough to finish
+          // inline. Losing this race doesn't cancel the build — it keeps
+          // running and populates the cache for the next keystroke.
+          await Promise.race([build, sleep(SEARCH_BUDGET_MS)]);
+          cached = indexCache.get(key);
+        }
+        // Stale-but-present: serve what we have and refresh in the background.
+      }
+      if (!cached) return [];
+
+      return searchIndex(cached.entries, query).map((entry) => ({
         id: encodeItemId(
           entry.kind,
           root.hostId,
