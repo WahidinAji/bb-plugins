@@ -2,6 +2,8 @@
 
 A collection of [BB](https://getbb.app) plugins. Each subdirectory is a standalone plugin with its own `package.json` and BB manifest. Install one or install all via `.bb/plugins.json`.
 
+Original idea from [@elianiva](https://github.com/elianiva/bb-plugins)
+
 ## Plugins
 
 | Plugin | What it does |
