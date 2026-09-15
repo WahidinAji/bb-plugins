@@ -31,7 +31,11 @@ interface IndexEntry {
 // keystroke lands after the background build has populated the cache.
 const SEARCH_BUDGET_MS = 1_500;
 const INDEX_TTL_MS = 5 * 60_000;
-const INDEX_LIMIT = 50_000;
+// host.list_paths hard-caps `limit` at 10,000 (HTTP 400 above that), so this
+// must stay at or under the cap — otherwise every background build fails and
+// the index silently never (re)populates, permanently serving whatever
+// (possibly unfiltered) result last happened to build successfully.
+const INDEX_LIMIT = 10_000;
 
 function dirOf(relativePath: string): string {
   const separatorIndex = relativePath.lastIndexOf("/");
