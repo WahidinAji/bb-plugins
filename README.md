@@ -9,6 +9,7 @@ Original idea from [@elianiva](https://github.com/elianiva/bb-plugins)
 | Plugin | What it does |
 |--------|--------------|
 | [mention-the-file](mention-the-file/) | Type `@` in the composer to search and mention a file or directory from the thread's workspace; its contents (or listing) are attached as context for the agent. |
+| [file-editor](file-editor/) | Live Editor. Opens code files in a CodeMirror editor that shows changes made on disk within about a second and refuses saves that would overwrite a newer file. It also replaces BB's read-only code viewer. |
 | [porcelain](https://github.com/WahidinAji/bb-plugin-porcelain) | VS Code-style source control for a thread's environment — stage, discard, diff, commit, branch, and push the git working tree. Included as a git submodule. |
 
 ## Install

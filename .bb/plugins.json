@@ -2,5 +2,8 @@
   "$schema": "https://getbb.app/schemas/plugins.schema.json",
   "schemaVersion": 1,
   "name": "bb-plugins",
-  "plugins": [{ "name": "mention-the-file", "source": "./mention-the-file" }]
+  "plugins": [
+    { "name": "mention-the-file", "source": "./mention-the-file" },
+    { "name": "file-editor", "source": "./file-editor" }
+  ]
 }
